@@ -1,0 +1,13 @@
+{
+  "name": "unn-medrehab-bot",
+  "version": "1.0.0",
+  "description": "UNN Medical Rehabilitation Telegram Portal Bot",
+  "main": "api/webhook.js",
+  "scripts": {
+    "start": "node api/webhook.js"
+  },
+  "dependencies": {
+    "mongodb": "^6.5.0",
+    "telegraf": "^4.16.3"
+  }
+}
