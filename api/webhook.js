@@ -5,7 +5,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 let cachedDb = null;
 let webhookConfigured = false;
 
-// 30-minute menu lifetime for lazy timer purge
+// Standard 30-minute menu lifetime for member menus
 const MENU_TTL_MS = 30 * 60 * 1000;
 
 // Reusable Database Connection
@@ -19,7 +19,7 @@ async function connectToDatabase() {
   return cachedDb;
 }
 
-// Safe Message Deletion
+// Safe Message Deletion (Catches missing permissions or deleted messages gracefully)
 async function safeDelete(chatId, messageIds) {
   try {
     const ids = Array.isArray(messageIds) ? messageIds : [messageIds];
@@ -35,13 +35,13 @@ async function safeDelete(chatId, messageIds) {
   }
 }
 
-// Lazy Timer: Purges expired banners and active menus
+// Lazy Timer: Purges expired banners, menus, and transient notices
 async function cleanupStaleMenus(db, chatId) {
   try {
     const now = new Date();
     const expiredMenus = await db.collection('active_menus').find({
       chatId,
-      expiresAt: { $lte: now }
+      expiresAt: { $ne: null, $lte: now }
     }).toArray();
 
     for (const menu of expiredMenus) {
@@ -53,7 +53,7 @@ async function cleanupStaleMenus(db, chatId) {
     if (expiredMenus.length > 0) {
       await db.collection('active_menus').deleteMany({
         chatId,
-        expiresAt: { $lte: now }
+        expiresAt: { $ne: null, $lte: now }
       });
     }
   } catch (err) {
@@ -61,7 +61,7 @@ async function cleanupStaleMenus(db, chatId) {
   }
 }
 
-// Admin Check
+// Admin Check: Exempts admins from cooldowns and forced deletions
 async function isGroupAdmin(ctx, userId) {
   if (String(userId) === String(process.env.SUPER_ADMIN_ID)) return true;
   try {
@@ -84,7 +84,7 @@ function extractCourseCode(text) {
   return match ? `${match[1].toUpperCase()}${match[2]}` : null;
 }
 
-// Material Classifier: Word boundaries prevent false positive substring matches
+// Strict Type Classifier: Prevents false positive substring matches
 function detectMaterialType(rawTitle, caption = '') {
   const cleanedText = `${rawTitle} ${caption}`
     .replace(/\.(pdf|docx?|pptx?|epub|txt)/gi, ' ')
@@ -95,21 +95,21 @@ function detectMaterialType(rawTitle, caption = '') {
   return isPQ ? 'pq' : 'doc';
 }
 
-// Custom Duration Parser: "30m", "2h", "1d", "permanent", "off" -> milliseconds
+// Duration Parser: Distinguishes hours, minutes, and days cleanly
 function parseDuration(input) {
   if (!input) return null;
   const clean = input.trim().toLowerCase();
   if (['0', 'off', 'perm', 'permanent', 'never'].includes(clean)) return 0;
 
-  const match = clean.match(/^(\d+)\s*(m|min|mins|h|hr|hrs|d|days?)$/i);
+  const match = clean.match(/^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/i);
   if (!match) return null;
 
   const val = parseInt(match[1], 10);
   const unit = match[2].toLowerCase();
 
-  if (unit.startsWith('m')) return val * 60 * 1000;
-  if (unit.startsWith('h')) return val * 60 * 60 * 1000;
-  if (unit.startsWith('d')) return val * 24 * 60 * 60 * 1000;
+  if (/^(m|min|mins|minute|minutes)$/.test(unit)) return val * 60 * 1000;
+  if (/^(h|hr|hrs|hour|hours)$/.test(unit)) return val * 60 * 60 * 1000;
+  if (/^(d|day|days)$/.test(unit)) return val * 24 * 60 * 60 * 1000;
   return null;
 }
 
@@ -117,15 +117,15 @@ function formatDuration(ms) {
   if (!ms || ms <= 0) return 'permanent';
   const hours = ms / (60 * 60 * 1000);
   if (hours >= 24) return `${Math.round(hours / 24)} day(s)`;
-  if (hours >= 1) return `${Math.round(hours)} hour(s)`;
-  return `${Math.round(ms / (60 * 1000))} minute(s)`;
+  if (hours >= 1) return `${Math.round(hours)} hr(s)`;
+  return `${Math.round(ms / (60 * 1000))} min(s)`;
 }
 
 function escapeHtml(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Topic Auto-Index
+// Topic Auto-Index: On Forum Topic Created
 bot.on('forum_topic_created', async (ctx) => {
   const topic = ctx.message.forum_topic_created;
   const courseCode = extractCourseCode(topic.name);
@@ -147,6 +147,7 @@ bot.on('forum_topic_created', async (ctx) => {
   }
 });
 
+// Topic Auto-Index: On Forum Topic Renamed
 bot.on('forum_topic_edited', async (ctx) => {
   const edited = ctx.message.forum_topic_edited;
   if (!edited?.name) return;
@@ -204,26 +205,26 @@ bot.command('setcourse', async (ctx) => {
   setTimeout(() => safeDelete(chatId, confirm.message_id), 5000);
 });
 
-// --- Bot Introduction Command (/hello) ---
+// --- Dynamic Bot Introduction (/hello) ---
 bot.command('hello', async (ctx) => {
   const chatId = ctx.chat.id;
   const userMsgId = ctx.message.message_id;
   const userId = ctx.from.id;
 
   await safeDelete(chatId, userMsgId);
-
   const isAdmin = await isGroupAdmin(ctx, userId);
 
   const introText = 
-`🤖 <b>Hello, Elite Physios! I am your Departmental Academic Bot.</b>
+`👋 <b>Greetings, Elite Physios!</b>
 
-I am here to help you seamlessly organize, store, and access all course notes, slides, and past questions right inside our forum topics without cluttering the chat.
+I am your official departmental academic assistant, built to keep our lectures, slides, and study resources structured and easily accessible without cluttering group discussions.
 
-• Use <code>/greet</code> to view the quick command guide.
-• Use <code>/course &lt;CODE&gt;</code> to browse materials.`;
+📖 <b>Need command instructions?</b>
+Check my profile bio or tap the native menu button to explore full documentation and available features.`;
 
   const banner = await ctx.reply(introText, { parse_mode: 'HTML' });
 
+  // Admins never trigger cooldowns or auto-deletion timers
   if (!isAdmin) {
     const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
     const db = await connectToDatabase();
@@ -241,7 +242,7 @@ I am here to help you seamlessly organize, store, and access all course notes, s
         chatId,
         messageId: banner.message_id
       });
-      if (stillActive) {
+      if (stillActive && stillActive.expiresAt && stillActive.expiresAt <= new Date()) {
         await safeDelete(chatId, banner.message_id);
         await db.collection('active_menus').deleteOne({ chatId, messageId: banner.message_id });
       }
@@ -249,13 +250,13 @@ I am here to help you seamlessly organize, store, and access all course notes, s
   }
 });
 
-// --- Dynamic Showcase Command (/greet [time] [--keep]) ---
-bot.hears(/^\/greet(?:@\w+)?(?:\s+(.*))?$/i, async (ctx) => {
+// --- Showcase Motivation Command (/greet [time] [--keep]) ---
+bot.command('greet', async (ctx) => {
   const chatId = ctx.chat.id;
   const userMsgId = ctx.message.message_id;
   const userId = ctx.from.id;
-  const rawArgs = (ctx.match[1] || '').trim().split(/\s+/).filter(Boolean);
 
+  const rawArgs = ctx.message.text.trim().split(/\s+/).slice(1);
   const isAdmin = await isGroupAdmin(ctx, userId);
 
   const shouldKeepCommand = isAdmin && rawArgs.some(arg => ['--keep', '-k', 'keep'].includes(arg.toLowerCase()));
@@ -264,8 +265,9 @@ bot.hears(/^\/greet(?:@\w+)?(?:\s+(.*))?$/i, async (ctx) => {
   }
 
   const timeArg = rawArgs.find(arg => !['--keep', '-k', 'keep'].includes(arg.toLowerCase()));
-
   let durationMs = 0;
+
+  // Regular members default to 3 hours; admins default to permanent (0 ms) unless specified
   if (!isAdmin) {
     durationMs = 3 * 60 * 60 * 1000;
   } else if (timeArg) {
@@ -273,31 +275,36 @@ bot.hears(/^\/greet(?:@\w+)?(?:\s+(.*))?$/i, async (ctx) => {
     if (parsed !== null) durationMs = parsed;
   }
 
+  // West Africa Time (WAT / UTC+1)
   const watHour = (new Date().getUTCHours() + 1) % 24;
   let greeting = 'Good evening';
+  let punchline = 'Wrap up strong, review your notes, and rest well for tomorrow.';
+
   if (watHour >= 5 && watHour < 12) {
     greeting = 'Good morning';
+    punchline = 'Rise with purpose, tackle the day head-on, and dominate your coursework.';
   } else if (watHour >= 12 && watHour < 17) {
     greeting = 'Good afternoon';
+    punchline = 'Keep the momentum going. Consistency is where distinction is built.';
   } else if (watHour >= 22 || watHour < 5) {
     greeting = 'Late hours grind';
+    punchline = 'The midnight oil always pays dividends. Stay focused, finish the task, and conquer.';
   }
 
   let footerNote;
   if (durationMs === 0) {
-    footerNote = `<i>📌 Pinned portal guide by Course Admin.</i>`;
+    footerNote = `<i>📌 Pinned announcement by Course Admin.</i>`;
   } else {
-    footerNote = `<i>Self-destructs in ${formatDuration(durationMs)} to keep chat clean.</i>`;
+    footerNote = `<i>Self-destructs in ${formatDuration(durationMs)} to keep the chat clean.</i>`;
   }
 
   const welcomeText = 
 `⚡ <b>${greeting}, Elite Physios! Win big today.</b>
 
-Your academic vault is live. Grab what you need and keep moving:
+${punchline}
 
-• <b>Get materials:</b> <code>/course</code> (in topic) or <code>/course &lt;CODE&gt;</code>
-• <b>Reps save:</b> Reply to file with <code>/save</code>
-• <b>Reps fix:</b> Reply with <code>/move &lt;CODE&gt;</code> or <code>/move pq</code>
+• <b>Browse materials:</b> Type <code>/course</code> inside any course topic or <code>/course &lt;CODE&gt;</code> anywhere.
+• <b>Bot commands:</b> Go to my profile bio or chat menu for the full guide.
 
 ${footerNote}`;
 
@@ -318,7 +325,7 @@ ${footerNote}`;
         chatId,
         messageId: banner.message_id
       });
-      if (stillActive) {
+      if (stillActive && stillActive.expiresAt && stillActive.expiresAt <= new Date()) {
         await safeDelete(chatId, banner.message_id);
         await db.collection('active_menus').deleteOne({ chatId, messageId: banner.message_id });
       }
@@ -326,74 +333,100 @@ ${footerNote}`;
   }
 });
 
-// --- Admin /keep Command with Custom Timestamp & Status Update ---
+// --- /keep Command (Admins set custom/permanent; Members add +10m) ---
 bot.command('keep', async (ctx) => {
   const chatId = ctx.chat.id;
   const userMsgId = ctx.message.message_id;
+  const userId = ctx.from.id;
 
-  const isAdmin = await isGroupAdmin(ctx, ctx.from.id);
-  if (!isAdmin) {
-    await safeDelete(chatId, userMsgId);
-    return;
-  }
-
-  const replyTarget = ctx.message.reply_to_message;
-  if (!replyTarget) {
-    await safeDelete(chatId, userMsgId);
-    const declination = await ctx.reply('⚠️ <b>Declined:</b> Reply directly with <code>/keep [time]</code> to the message you want to preserve.', { parse_mode: 'HTML' });
-    setTimeout(() => safeDelete(chatId, declination.message_id), 6000);
-    return;
-  }
-
+  const isAdmin = await isGroupAdmin(ctx, userId);
   const rawText = ctx.message.text.trim();
   const args = rawText.split(/\s+/).slice(1);
-  const shouldKeepCommand = args.some(arg => ['--keep', '-k', 'keep'].includes(arg.toLowerCase()));
+
+  const shouldKeepCommand = isAdmin && args.some(arg => ['--keep', '-k'].includes(arg.toLowerCase()));
   if (!shouldKeepCommand) {
     await safeDelete(chatId, userMsgId);
   }
 
-  const timeArg = args.find(arg => !['--keep', '-k', 'keep'].includes(arg.toLowerCase()));
-  const durationMs = timeArg ? parseDuration(timeArg) : 0; // 0 means permanent
+  const replyTarget = ctx.message.reply_to_message;
+  if (!replyTarget) {
+    const declination = await ctx.reply('⚠️ <b>Declined:</b> Reply directly with <code>/keep</code> to the message or menu you want to preserve.', { parse_mode: 'HTML' });
+    setTimeout(() => safeDelete(chatId, declination.message_id), 6000);
+    return;
+  }
 
-  const db = await connectToDatabase();
   const targetId = replyTarget.message_id;
+  const db = await connectToDatabase();
+  const existingRecord = await db.collection('active_menus').findOne({ chatId, messageId: targetId });
 
-  if (durationMs === 0) {
+  let newExpiresAt = null;
+  let statusText = '';
+
+  if (isAdmin) {
+    const timeArg = args.find(arg => !['--keep', '-k'].includes(arg.toLowerCase()));
+    if (timeArg) {
+      const parsedMs = parseDuration(timeArg);
+      if (parsedMs === null) {
+        const warn = await ctx.reply('⚠️ Invalid format. Use e.g. <code>/keep 30m</code>, <code>/keep 2hrs</code>, or <code>/keep perm</code>.', { parse_mode: 'HTML' });
+        setTimeout(() => safeDelete(chatId, warn.message_id), 6000);
+        return;
+      }
+      if (parsedMs === 0) {
+        newExpiresAt = null;
+        statusText = 'Permanent';
+      } else {
+        newExpiresAt = new Date(Date.now() + parsedMs);
+        statusText = `Extended by Admin (${formatDuration(parsedMs)})`;
+      }
+    } else {
+      newExpiresAt = null;
+      statusText = 'Permanent';
+    }
+  } else {
+    // Member execution: extend current expiration by 10 minutes
+    const TEN_MINS_MS = 10 * 60 * 1000;
+    const currentExpiry = existingRecord?.expiresAt ? new Date(existingRecord.expiresAt).getTime() : Date.now();
+    const baseTime = Math.max(currentExpiry, Date.now());
+    newExpiresAt = new Date(baseTime + TEN_MINS_MS);
+    statusText = '+10 mins added';
+  }
+
+  // Update Database Record
+  if (newExpiresAt === null) {
     await db.collection('active_menus').deleteMany({ chatId, messageId: targetId });
   } else {
-    const expiresAt = new Date(Date.now() + durationMs);
     await db.collection('active_menus').updateOne(
       { chatId, messageId: targetId },
-      { $set: { expiresAt, updatedAt: new Date() } },
+      { $set: { expiresAt: newExpiresAt, updatedAt: new Date() } },
       { upsert: true }
     );
   }
 
+  // Cleanly Update Message Footer
   try {
     let originalText = replyTarget.text || replyTarget.caption || '';
-    originalText = originalText.replace(/\n\n<i>(Self-destructs.*?|📌 Pinned.*?|📌 Kept.*?)<\/i>/gis, '');
-    
-    const timestampLabel = durationMs === 0 ? 'Permanent' : `Until ${new Date(Date.now() + durationMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${formatDuration(durationMs)})`;
-    const newFooter = `\n\n<i>📌 Kept by Admin • ${timestampLabel}</i>`;
-    const updatedText = originalText + newFooter;
+    originalText = originalText.replace(/\n\n<i>(Self-destructs.*?|📌 Pinned.*?|📌 Kept.*?|⏳ Expires in.*?)<\/i>/gis, '');
+
+    const footer = newExpiresAt === null
+      ? `\n\n<i>📌 Pinned by Admin • Permanent</i>`
+      : `\n\n<i>📌 Kept • ${statusText} (Expires: ${newExpiresAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})</i>`;
 
     await ctx.telegram.editMessageText(
       chatId,
       targetId,
       undefined,
-      updatedText,
+      originalText + footer,
       {
         parse_mode: 'HTML',
         reply_markup: replyTarget.reply_markup
       }
     );
 
-    const confirm = await ctx.reply(`✅ Message kept successfully (${timestampLabel}).`, { parse_mode: 'HTML' });
-    setTimeout(() => safeDelete(chatId, confirm.message_id), 4000);
-  } catch (err) {
-    console.warn('Could not edit kept message text:', err.message);
-    const confirm = await ctx.reply('📌 <b>Preserved:</b> Message marked as kept.', { parse_mode: 'HTML' });
-    setTimeout(() => safeDelete(chatId, confirm.message_id), 4000);
+    const alert = await ctx.reply(`✅ <b>Keep applied:</b> ${statusText}.`, { parse_mode: 'HTML' });
+    setTimeout(() => safeDelete(chatId, alert.message_id), 4000);
+  } catch {
+    const alert = await ctx.reply(`✅ <b>Keep applied:</b> ${statusText}.`, { parse_mode: 'HTML' });
+    setTimeout(() => safeDelete(chatId, alert.message_id), 4000);
   }
 });
 
@@ -585,7 +618,7 @@ bot.command(['remove', 'delete'], async (ctx) => {
   setTimeout(() => safeDelete(chatId, notice.message_id), 5000);
 });
 
-// --- /course Query Handler ---
+// --- /course Query Handler with Explicit Expiration & Admin Exemption ---
 bot.command('course', async (ctx) => {
   const chatId = ctx.chat.id;
   const userMsgId = ctx.message.message_id;
@@ -594,6 +627,9 @@ bot.command('course', async (ctx) => {
   const topicScopeKey = isGeneralTab(ctx) ? 'general' : String(currentThreadId);
 
   await safeDelete(chatId, userMsgId);
+
+  // Check admin privileges: Admins do NOT trigger auto-cleanup/cooldown
+  const isAdmin = await isGroupAdmin(ctx, requesterId);
 
   const db = await connectToDatabase();
   await cleanupStaleMenus(db, chatId);
@@ -632,26 +668,45 @@ bot.command('course', async (ctx) => {
 
   buttons.push([Markup.button.callback('🗑 Close Menu', `dismiss_${requesterId}`)]);
 
+  // Expiration footer logic: Permanent for admins, 30m countdown for students
+  const expiryFooter = isAdmin 
+    ? `\n\n<i>📌 Pinned Menu by Admin • Permanent</i>`
+    : `\n\n<i>⏳ Expires in 30m • Reply /keep to extend</i>`;
+
   const menuMsg = await ctx.reply(
-    `📚 <b>${courseCode} Resources</b>\nTap any item to jump directly to the post:`,
+    `📚 <b>${courseCode} Resources</b>\nTap any item to jump directly to the post:${expiryFooter}`,
     {
       parse_mode: 'HTML',
       reply_markup: Markup.inlineKeyboard(buttons).reply_markup
     }
   );
 
-  const expiresAt = new Date(Date.now() + MENU_TTL_MS);
+  // Admin menus stay indefinitely; student menus expire in 30 minutes
+  const expiresAt = isAdmin ? null : new Date(Date.now() + MENU_TTL_MS);
+
   await activeMenus.updateOne(
     { chatId, topicScopeKey },
     { 
       $set: { 
         messageId: menuMsg.message_id, 
+        type: 'course_menu',
         expiresAt,
         updatedAt: new Date() 
       } 
     },
     { upsert: true }
   );
+
+  // Fallback in-memory timeout for warm instances (only for non-admin invocations)
+  if (!isAdmin) {
+    setTimeout(async () => {
+      const currentRecord = await activeMenus.findOne({ chatId, messageId: menuMsg.message_id });
+      if (currentRecord && currentRecord.expiresAt && currentRecord.expiresAt <= new Date()) {
+        await safeDelete(chatId, menuMsg.message_id);
+        await activeMenus.deleteOne({ chatId, messageId: menuMsg.message_id });
+      }
+    }, MENU_TTL_MS);
+  }
 });
 
 // Scoped Dismiss Callback
