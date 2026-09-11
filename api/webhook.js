@@ -35,7 +35,7 @@ async function safeDelete(chatId, messageIds) {
   }
 }
 
-// Lazy Timer: Sweep and purge expired active menus from chat on next command
+// Lazy Timer: Sweep and purge expired active menus or banners from chat
 async function cleanupStaleMenus(db, chatId) {
   try {
     const now = new Date();
@@ -78,10 +78,10 @@ function isGeneralTab(ctx) {
   return !threadId || threadId === 1;
 }
 
-// Course Code Normalizer ("med 101", "MED-101", "Intro to MED 101" -> "MED101")
+// Course Code Normalizer: Supports 2 to 4 letters ("chem 108", "CHEM-108", "med 101" -> "CHEM108", "MED101")
 function extractCourseCode(text) {
   if (!text) return null;
-  const match = text.match(/([a-zA-Z]{3})\s*[-_]?\s*([0-9]{3})/i);
+  const match = text.match(/\b([a-zA-Z]{2,4})\s*[-_]?\s*([0-9]{3})\b/i);
   return match ? `${match[1].toUpperCase()}${match[2]}` : null;
 }
 
@@ -107,11 +107,12 @@ bot.on('forum_topic_created', async (ctx) => {
 
   if (courseCode) {
     const db = await connectToDatabase();
+    await db.collection('topics').deleteMany({ chatId: ctx.chat.id, threadId: ctx.message.message_thread_id });
     await db.collection('topics').updateOne(
-      { chatId: ctx.chat.id, courseCode },
+      { chatId: ctx.chat.id, threadId: ctx.message.message_thread_id },
       { 
         $set: { 
-          threadId: ctx.message.message_thread_id, 
+          courseCode, 
           topicName: topic.name, 
           updatedAt: new Date() 
         } 
@@ -129,11 +130,12 @@ bot.on('forum_topic_edited', async (ctx) => {
   const courseCode = extractCourseCode(edited.name);
   if (courseCode) {
     const db = await connectToDatabase();
+    await db.collection('topics').deleteMany({ chatId: ctx.chat.id, threadId: ctx.message.message_thread_id });
     await db.collection('topics').updateOne(
-      { chatId: ctx.chat.id, courseCode },
+      { chatId: ctx.chat.id, threadId: ctx.message.message_thread_id },
       { 
         $set: { 
-          threadId: ctx.message.message_thread_id, 
+          courseCode, 
           topicName: edited.name, 
           updatedAt: new Date() 
         } 
@@ -143,7 +145,7 @@ bot.on('forum_topic_edited', async (ctx) => {
   }
 });
 
-// Manual Topic Linker: /setcourse MED101
+// Manual Topic Linker: /setcourse CHEM108 (Cleans up previous mappings for this thread)
 bot.command('setcourse', async (ctx) => {
   const chatId = ctx.chat.id;
   await safeDelete(chatId, ctx.message.message_id);
@@ -161,20 +163,81 @@ bot.command('setcourse', async (ctx) => {
   const courseCode = extractCourseCode(ctx.message.text);
 
   if (!courseCode) {
-    const warn = await ctx.reply('⚠️ Provide a course code. Example: <code>/setcourse MED101</code>', { parse_mode: 'HTML' });
+    const warn = await ctx.reply('⚠️ Provide a valid course code. Example: <code>/setcourse CHEM108</code>', { parse_mode: 'HTML' });
     setTimeout(() => safeDelete(chatId, warn.message_id), 6000);
     return;
   }
 
   const db = await connectToDatabase();
+
+  // Purge any stale/accidental course code attached to this topic
+  await db.collection('topics').deleteMany({ chatId, threadId });
+
+  // Set the clean course mapping
   await db.collection('topics').updateOne(
-    { chatId, courseCode },
-    { $set: { threadId, updatedAt: new Date() } },
+    { chatId, threadId },
+    { $set: { courseCode, updatedAt: new Date() } },
     { upsert: true }
   );
 
-  const confirm = await ctx.reply(`✅ Topic mapped to <b>${courseCode}</b>.`, { parse_mode: 'HTML' });
+  const confirm = await ctx.reply(`✅ Topic successfully mapped to <b>${courseCode}</b>.`, { parse_mode: 'HTML' });
   setTimeout(() => safeDelete(chatId, confirm.message_id), 5000);
+});
+
+// --- Dynamic Time-Aware Showcase Broadcast Handler ---
+bot.command(['hello', 'start', 'help'], async (ctx) => {
+  const chatId = ctx.chat.id;
+  const userMsgId = ctx.message.message_id;
+  const userId = ctx.from.id;
+
+  await safeDelete(chatId, userMsgId);
+
+  // Check role: Admins post persistent banners, members trigger self-destructing banners
+  const isAdmin = await isGroupAdmin(ctx, userId);
+
+  // Calculate West Africa Time (UTC+1)
+  const watHour = (new Date().getUTCHours() + 1) % 24;
+  let greeting = 'Good evening';
+  if (watHour >= 5 && watHour < 12) {
+    greeting = 'Good morning';
+  } else if (watHour >= 12 && watHour < 17) {
+    greeting = 'Good afternoon';
+  } else if (watHour >= 22 || watHour < 5) {
+    greeting = 'Late hours grind';
+  }
+
+  const footerNote = isAdmin
+    ? `<i>📌 Pinned guide by Course Admin.</i>`
+    : `<i>Self-destructs in 3 hours to keep the chat clean.</i>`;
+
+  const welcomeText = 
+`⚡ <b>${greeting}, Elite Physios! Win big today.</b>
+
+Your academic vault is live. Grab what you need and keep moving:
+
+• <b>Get materials:</b> <code>/course</code> (in topic) or <code>/course &lt;CODE&gt;</code>
+• <b>Reps save:</b> Reply to file with <code>/save</code>
+• <b>Reps fix:</b> Reply with <code>/move &lt;CODE&gt;</code> or <code>/move pq</code>
+
+${footerNote}`;
+
+  const banner = await ctx.reply(welcomeText, { parse_mode: 'HTML' });
+
+  // 3-hour expiry applies exclusively to regular members
+  if (!isAdmin) {
+    const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+    const db = await connectToDatabase();
+
+    await db.collection('active_menus').insertOne({
+      chatId,
+      messageId: banner.message_id,
+      type: 'broadcast',
+      expiresAt: new Date(Date.now() + THREE_HOURS_MS),
+      createdAt: new Date()
+    });
+
+    setTimeout(() => safeDelete(chatId, banner.message_id), THREE_HOURS_MS);
+  }
 });
 
 // --- /save Handler with Confirmation & Declination Alerts ---
@@ -201,7 +264,7 @@ bot.command('save', async (ctx) => {
   const rawInput = ctx.message.text.trim().split(/\s+/).slice(1).join(' ');
   let courseCode = null;
 
-  // 1. Argument passed: /save MED101 or /save Anatomy
+  // 1. Argument passed: /save CHEM108 or /save Anatomy
   if (rawInput) {
     courseCode = extractCourseCode(rawInput);
     if (!courseCode) {
@@ -222,7 +285,7 @@ bot.command('save', async (ctx) => {
   // Declination: Course cannot be resolved
   if (!courseCode) {
     const declination = await ctx.reply(
-      '⚠️ <b>Declined:</b> Specify the course or topic name.\nExample: <code>/save MED101</code> or reply inside that course\'s topic.',
+      '⚠️ <b>Declined:</b> Specify the course code or topic name.\nExample: <code>/save CHEM108</code> or reply inside that course\'s topic.',
       { parse_mode: 'HTML' }
     );
     setTimeout(() => safeDelete(chatId, declination.message_id), 8000);
@@ -287,7 +350,7 @@ bot.command('move', async (ctx) => {
 
   if (!newCourseCode && !newType) {
     const declination = await ctx.reply(
-      '⚠️ <b>Declined:</b> Specify updates.\n• <code>/move MED102</code>\n• <code>/move pq</code>\n• <code>/move doc</code>',
+      '⚠️ <b>Declined:</b> Specify updates.\n• <code>/move CHEM108</code>\n• <code>/move pq</code>\n• <code>/move doc</code>',
       { parse_mode: 'HTML' }
     );
     setTimeout(() => safeDelete(chatId, declination.message_id), 8000);
@@ -349,10 +412,10 @@ bot.command(['remove', 'delete'], async (ctx) => {
   }
 
   const courseCode = extractCourseCode(rawInput);
-  const searchTitle = rawInput.replace(/([a-zA-Z]{3})\s*[-_]?\s*([0-9]{3})/i, '').trim();
+  const searchTitle = rawInput.replace(/\b([a-zA-Z]{2,4})\s*[-_]?\s*([0-9]{3})\b/i, '').trim();
 
   if (!courseCode || !searchTitle) {
-    const declination = await ctx.reply('⚠️ <b>Declined:</b> Reply with <code>/remove</code> or type: <code>/remove MED101 Title</code>', { parse_mode: 'HTML' });
+    const declination = await ctx.reply('⚠️ <b>Declined:</b> Reply with <code>/remove</code> or type: <code>/remove CHEM108 Title</code>', { parse_mode: 'HTML' });
     setTimeout(() => safeDelete(chatId, declination.message_id), 8000);
     return;
   }
@@ -368,7 +431,7 @@ bot.command(['remove', 'delete'], async (ctx) => {
   setTimeout(() => safeDelete(chatId, notice.message_id), 5000);
 });
 
-// --- /course Handler ---
+// --- /course Query Handler ---
 bot.command('course', async (ctx) => {
   const chatId = ctx.chat.id;
   const userMsgId = ctx.message.message_id;
@@ -390,7 +453,7 @@ bot.command('course', async (ctx) => {
   }
 
   if (!courseCode) {
-    const warn = await ctx.reply('⚠️ Please provide a course code.\nExample: <code>/course MED101</code>', { parse_mode: 'HTML' });
+    const warn = await ctx.reply('⚠️ Please provide a course code.\nExample: <code>/course CHEM108</code>', { parse_mode: 'HTML' });
     setTimeout(() => safeDelete(chatId, warn.message_id), 6000);
     return;
   }
