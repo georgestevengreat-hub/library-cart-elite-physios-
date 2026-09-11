@@ -217,10 +217,10 @@ bot.command('hello', async (ctx) => {
   const introText = 
 `👋 <b>Greetings, Elite Physios!</b>
 
-I am your official departmental academic assistant, built to keep our lectures, slides, and study resources structured and easily accessible without cluttering group discussions.
+I am your official departmental academic assistant, built to keep our lecture slides, past questions, and study resources structured and instantly accessible right inside our forum topics.
 
-📖 <b>Need command instructions?</b>
-Check my profile bio or tap the native menu button to explore full documentation and available features.`;
+• <b>Browse materials:</b> Type <code>/course</code> inside any course topic, or <code>/course &lt;CODE&gt;</code> anywhere.
+• <b>Command list &amp; guide:</b> Tap my profile bio or check the chat menu for full instructions.`;
 
   const banner = await ctx.reply(introText, { parse_mode: 'HTML' });
 
@@ -278,35 +278,28 @@ bot.command('greet', async (ctx) => {
   // West Africa Time (WAT / UTC+1)
   const watHour = (new Date().getUTCHours() + 1) % 24;
   let greeting = 'Good evening';
-  let punchline = 'Wrap up strong, review your notes, and rest well for tomorrow.';
+  let punchline = "Finish today strong, consolidate your reading, and lay down tomorrow's foundation tonight.";
 
   if (watHour >= 5 && watHour < 12) {
     greeting = 'Good morning';
-    punchline = 'Rise with purpose, tackle the day head-on, and dominate your coursework.';
+    punchline = 'Step out with absolute clarity, dominate your lectures, and set the pace for excellence.';
   } else if (watHour >= 12 && watHour < 17) {
     greeting = 'Good afternoon';
-    punchline = 'Keep the momentum going. Consistency is where distinction is built.';
+    punchline = 'Maintain your focus and keep the momentum alive. True distinction is forged in relentless daily consistency.';
   } else if (watHour >= 22 || watHour < 5) {
     greeting = 'Late hours grind';
-    punchline = 'The midnight oil always pays dividends. Stay focused, finish the task, and conquer.';
-  }
-
-  let footerNote;
-  if (durationMs === 0) {
-    footerNote = `<i>📌 Pinned announcement by Course Admin.</i>`;
-  } else {
-    footerNote = `<i>Self-destructs in ${formatDuration(durationMs)} to keep the chat clean.</i>`;
+    punchline = 'The midnight oil always compounds into mastery. Lock in, stay sharp, and own the night.';
   }
 
   const welcomeText = 
 `⚡ <b>${greeting}, Elite Physios! Win big today.</b>
 
-${punchline}
+${punchline} Excellence in Medical Rehabilitation isn't an accident—it's built lecture by lecture, slide by slide, and concept by concept. Show up with relentless standard and conquer every hurdle.
 
-• <b>Browse materials:</b> Type <code>/course</code> inside any course topic or <code>/course &lt;CODE&gt;</code> anywhere.
-• <b>Bot commands:</b> Go to my profile bio or chat menu for the full guide.
+• <b>Access Departmental Vault:</b> Type <code>/course</code> inside any course topic or <code>/course &lt;CODE&gt;</code> anywhere.
+• <b>Bot Commands:</b> Tap my profile bio or the chat menu button for the full documentation.
 
-${footerNote}`;
+<i>📌 Pinned portal guide by admin</i>`;
 
   const banner = await ctx.reply(welcomeText, { parse_mode: 'HTML' });
 
