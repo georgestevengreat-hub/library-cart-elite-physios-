@@ -72,6 +72,17 @@ async function isGroupAdmin(ctx, userId) {
   }
 }
 
+// Universal Flag Checker: Checks if an admin appended --keep or -k to retain their command
+async function shouldPreserveCommand(ctx) {
+  const userId = ctx.from.id;
+  const isAdmin = await isGroupAdmin(ctx, userId);
+  if (!isAdmin) return false;
+
+  const text = ctx.message?.text || '';
+  const args = text.trim().split(/\s+/).slice(1);
+  return args.some(arg => ['--keep', '-k'].includes(arg.toLowerCase()));
+}
+
 function isGeneralTab(ctx) {
   const threadId = ctx.message?.message_thread_id;
   return !threadId || threadId === 1;
@@ -170,10 +181,11 @@ bot.on('forum_topic_edited', async (ctx) => {
   }
 });
 
-// Manual Topic Linker: /setcourse CHEM108
+// Manual Topic Linker: /setcourse CHEM108 [--keep] (Admin Only)
 bot.command('setcourse', async (ctx) => {
   const chatId = ctx.chat.id;
-  await safeDelete(chatId, ctx.message.message_id);
+  const preserveCmd = await shouldPreserveCommand(ctx);
+  if (!preserveCmd) await safeDelete(chatId, ctx.message.message_id);
 
   const isAdmin = await isGroupAdmin(ctx, ctx.from.id);
   if (!isAdmin) return;
@@ -185,7 +197,8 @@ bot.command('setcourse', async (ctx) => {
   }
 
   const threadId = ctx.message.message_thread_id;
-  const courseCode = extractCourseCode(ctx.message.text);
+  const cleanText = ctx.message.text.replace(/\s+(--keep|-k)\b/gi, '');
+  const courseCode = extractCourseCode(cleanText);
 
   if (!courseCode) {
     const warn = await ctx.reply('⚠️ Provide a valid course code. Example: <code>/setcourse CHEM108</code>', { parse_mode: 'HTML' });
@@ -205,13 +218,82 @@ bot.command('setcourse', async (ctx) => {
   setTimeout(() => safeDelete(chatId, confirm.message_id), 5000);
 });
 
-// --- Dynamic Bot Introduction (/hello) ---
+// --- /checkmap Command (Admin Only) ---
+bot.command('checkmap', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const currentThreadId = ctx.message.message_thread_id;
+
+  const isAdmin = await isGroupAdmin(ctx, ctx.from.id);
+  if (!isAdmin) {
+    await safeDelete(chatId, ctx.message.message_id);
+    return;
+  }
+
+  const preserveCmd = await shouldPreserveCommand(ctx);
+  if (!preserveCmd) await safeDelete(chatId, ctx.message.message_id);
+
+  const db = await connectToDatabase();
+
+  if (isGeneralTab(ctx)) {
+    const allMappings = await db.collection('topics')
+      .find({ chatId })
+      .sort({ courseCode: 1 })
+      .toArray();
+
+    if (!allMappings.length) {
+      const emptyMsg = await ctx.reply('ℹ️ No topic mappings found for this group.');
+      setTimeout(() => safeDelete(chatId, emptyMsg.message_id), 8000);
+      return;
+    }
+
+    const cleanChatId = String(chatId).replace(/^-100/, '');
+    const lines = allMappings.map((m, idx) => {
+      const topicUrl = `https://t.me/c/${cleanChatId}/${m.threadId}`;
+      const name = m.topicName || `Topic #${m.threadId}`;
+      return `${idx + 1}. <b>${escapeHtml(m.courseCode)}</b> ➔ <a href="${topicUrl}">${escapeHtml(name)}</a>`;
+    });
+
+    const report = 
+`🗺 <b>Departmental Topic Mappings (${allMappings.length})</b>
+
+${lines.join('\n')}
+
+<i>Admins can update bindings anytime using /setcourse &lt;CODE&gt; inside any topic.</i>`;
+
+    await ctx.reply(report, { parse_mode: 'HTML', disable_web_page_preview: true });
+    return;
+  }
+
+  const currentMapping = await db.collection('topics').findOne({ chatId, threadId: currentThreadId });
+
+  if (!currentMapping) {
+    const unmappedMsg = await ctx.reply(
+      '⚠️ This topic is <b>unmapped</b>.\nUse <code>/setcourse &lt;CODE&gt;</code> here to link it to a course.',
+      { parse_mode: 'HTML' }
+    );
+    setTimeout(() => safeDelete(chatId, unmappedMsg.message_id), 8000);
+    return;
+  }
+
+  const topicInfo = 
+`📍 <b>Topic Mapping Details</b>
+
+• <b>Course:</b> <code>${escapeHtml(currentMapping.courseCode)}</code>
+• <b>Topic ID:</b> <code>${currentThreadId}</code>
+• <b>Topic Name:</b> ${escapeHtml(currentMapping.topicName || 'Custom Thread')}
+• <b>Status:</b> Active and indexed`;
+
+  await ctx.reply(topicInfo, { parse_mode: 'HTML' });
+});
+
+// --- Dynamic Bot Introduction (/hello [--keep]) ---
 bot.command('hello', async (ctx) => {
   const chatId = ctx.chat.id;
-  const userMsgId = ctx.message.message_id;
   const userId = ctx.from.id;
 
-  await safeDelete(chatId, userMsgId);
+  const preserveCmd = await shouldPreserveCommand(ctx);
+  if (!preserveCmd) await safeDelete(chatId, ctx.message.message_id);
+
   const isAdmin = await isGroupAdmin(ctx, userId);
 
   const introText = 
@@ -224,7 +306,6 @@ I am your official departmental academic assistant, built to keep our lecture sl
 
   const banner = await ctx.reply(introText, { parse_mode: 'HTML' });
 
-  // Admins never trigger cooldowns or auto-deletion timers
   if (!isAdmin) {
     const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
     const db = await connectToDatabase();
@@ -253,21 +334,17 @@ I am your official departmental academic assistant, built to keep our lecture sl
 // --- Showcase Motivation Command (/greet [time] [--keep]) ---
 bot.command('greet', async (ctx) => {
   const chatId = ctx.chat.id;
-  const userMsgId = ctx.message.message_id;
   const userId = ctx.from.id;
 
   const rawArgs = ctx.message.text.trim().split(/\s+/).slice(1);
   const isAdmin = await isGroupAdmin(ctx, userId);
 
-  const shouldKeepCommand = isAdmin && rawArgs.some(arg => ['--keep', '-k', 'keep'].includes(arg.toLowerCase()));
-  if (!shouldKeepCommand) {
-    await safeDelete(chatId, userMsgId);
-  }
+  const preserveCmd = await shouldPreserveCommand(ctx);
+  if (!preserveCmd) await safeDelete(chatId, ctx.message.message_id);
 
   const timeArg = rawArgs.find(arg => !['--keep', '-k', 'keep'].includes(arg.toLowerCase()));
   let durationMs = 0;
 
-  // Regular members default to 3 hours; admins default to permanent (0 ms) unless specified
   if (!isAdmin) {
     durationMs = 3 * 60 * 60 * 1000;
   } else if (timeArg) {
@@ -329,17 +406,14 @@ ${punchline} Excellence in Medical Rehabilitation isn't an accident—it's built
 // --- /keep Command (Admins set custom/permanent; Members add +10m) ---
 bot.command('keep', async (ctx) => {
   const chatId = ctx.chat.id;
-  const userMsgId = ctx.message.message_id;
   const userId = ctx.from.id;
 
   const isAdmin = await isGroupAdmin(ctx, userId);
   const rawText = ctx.message.text.trim();
   const args = rawText.split(/\s+/).slice(1);
 
-  const shouldKeepCommand = isAdmin && args.some(arg => ['--keep', '-k'].includes(arg.toLowerCase()));
-  if (!shouldKeepCommand) {
-    await safeDelete(chatId, userMsgId);
-  }
+  const preserveCmd = await shouldPreserveCommand(ctx);
+  if (!preserveCmd) await safeDelete(chatId, ctx.message.message_id);
 
   const replyTarget = ctx.message.reply_to_message;
   if (!replyTarget) {
@@ -376,7 +450,6 @@ bot.command('keep', async (ctx) => {
       statusText = 'Permanent';
     }
   } else {
-    // Member execution: extend current expiration by 10 minutes
     const TEN_MINS_MS = 10 * 60 * 1000;
     const currentExpiry = existingRecord?.expiresAt ? new Date(existingRecord.expiresAt).getTime() : Date.now();
     const baseTime = Math.max(currentExpiry, Date.now());
@@ -384,7 +457,6 @@ bot.command('keep', async (ctx) => {
     statusText = '+10 mins added';
   }
 
-  // Update Database Record
   if (newExpiresAt === null) {
     await db.collection('active_menus').deleteMany({ chatId, messageId: targetId });
   } else {
@@ -395,7 +467,6 @@ bot.command('keep', async (ctx) => {
     );
   }
 
-  // Cleanly Update Message Footer
   try {
     let originalText = replyTarget.text || replyTarget.caption || '';
     originalText = originalText.replace(/\n\n<i>(Self-destructs.*?|📌 Pinned.*?|📌 Kept.*?|⏳ Expires in.*?)<\/i>/gis, '');
@@ -423,16 +494,19 @@ bot.command('keep', async (ctx) => {
   }
 });
 
-// --- /save Handler ---
+// --- /save Handler ([CODE] [--keep]) (Admin Only) ---
 bot.command('save', async (ctx) => {
   const chatId = ctx.chat.id;
-  const userMsgId = ctx.message.message_id;
   const currentThreadId = ctx.message.message_thread_id;
 
-  await safeDelete(chatId, userMsgId);
-
   const isAdmin = await isGroupAdmin(ctx, ctx.from.id);
-  if (!isAdmin) return;
+  if (!isAdmin) {
+    await safeDelete(chatId, ctx.message.message_id);
+    return;
+  }
+
+  const preserveCmd = await shouldPreserveCommand(ctx);
+  if (!preserveCmd) await safeDelete(chatId, ctx.message.message_id);
 
   const replyTarget = ctx.message.reply_to_message;
   if (!replyTarget) {
@@ -444,7 +518,11 @@ bot.command('save', async (ctx) => {
   const db = await connectToDatabase();
   await cleanupStaleMenus(db, chatId);
 
-  const rawInput = ctx.message.text.trim().split(/\s+/).slice(1).join(' ');
+  const rawInput = ctx.message.text.trim()
+    .replace(/\s+(--keep|-k)\b/gi, '')
+    .split(/\s+/)
+    .slice(1)
+    .join(' ');
   let courseCode = null;
 
   if (rawInput) {
@@ -507,13 +585,18 @@ bot.command('save', async (ctx) => {
   setTimeout(() => safeDelete(chatId, confirmation.message_id), 5000);
 });
 
-// --- /move Handler ---
+// --- /move Handler ([CODE|pq|doc] [--keep]) (Admin Only) ---
 bot.command('move', async (ctx) => {
   const chatId = ctx.chat.id;
-  await safeDelete(chatId, ctx.message.message_id);
 
   const isAdmin = await isGroupAdmin(ctx, ctx.from.id);
-  if (!isAdmin) return;
+  if (!isAdmin) {
+    await safeDelete(chatId, ctx.message.message_id);
+    return;
+  }
+
+  const preserveCmd = await shouldPreserveCommand(ctx);
+  if (!preserveCmd) await safeDelete(chatId, ctx.message.message_id);
 
   const replyTarget = ctx.message.reply_to_message;
   if (!replyTarget) {
@@ -522,8 +605,9 @@ bot.command('move', async (ctx) => {
     return;
   }
 
-  const rawArgs = ctx.message.text.trim().split(/\s+/).slice(1);
-  const newCourseCode = extractCourseCode(ctx.message.text);
+  const cleanText = ctx.message.text.replace(/\s+(--keep|-k)\b/gi, '');
+  const rawArgs = cleanText.trim().split(/\s+/).slice(1);
+  const newCourseCode = extractCourseCode(cleanText);
   const wantsPQ = rawArgs.some(arg => ['pq', 'exam', 'test'].includes(arg.toLowerCase()));
   const wantsDoc = rawArgs.some(arg => ['doc', 'slide', 'note', 'book'].includes(arg.toLowerCase()));
   const newType = wantsPQ ? 'pq' : (wantsDoc ? 'doc' : null);
@@ -564,17 +648,23 @@ bot.command('move', async (ctx) => {
   setTimeout(() => safeDelete(chatId, confirmation.message_id), 5000);
 });
 
-// --- /remove Handler ---
+// --- /remove Handler ([CODE Title] [--keep]) (Admin Only) ---
 bot.command(['remove', 'delete'], async (ctx) => {
   const chatId = ctx.chat.id;
-  await safeDelete(chatId, ctx.message.message_id);
 
   const isAdmin = await isGroupAdmin(ctx, ctx.from.id);
-  if (!isAdmin) return;
+  if (!isAdmin) {
+    await safeDelete(chatId, ctx.message.message_id);
+    return;
+  }
+
+  const preserveCmd = await shouldPreserveCommand(ctx);
+  if (!preserveCmd) await safeDelete(chatId, ctx.message.message_id);
 
   const db = await connectToDatabase();
   const replyTarget = ctx.message.reply_to_message;
-  const rawInput = ctx.message.text.trim().split(/\s+/).slice(1).join(' ');
+  const cleanText = ctx.message.text.replace(/\s+(--keep|-k)\b/gi, '');
+  const rawInput = cleanText.trim().split(/\s+/).slice(1).join(' ');
 
   if (replyTarget) {
     const cleanChatId = String(chatId).replace(/^-100/, '');
@@ -611,23 +701,26 @@ bot.command(['remove', 'delete'], async (ctx) => {
   setTimeout(() => safeDelete(chatId, notice.message_id), 5000);
 });
 
-// --- /course Query Handler with Explicit Expiration & Admin Exemption ---
+// --- /course Query Handler ([CODE] [--keep]) ---
 bot.command('course', async (ctx) => {
   const chatId = ctx.chat.id;
-  const userMsgId = ctx.message.message_id;
   const requesterId = ctx.from.id;
   const currentThreadId = ctx.message.message_thread_id;
   const topicScopeKey = isGeneralTab(ctx) ? 'general' : String(currentThreadId);
 
-  await safeDelete(chatId, userMsgId);
+  const preserveCmd = await shouldPreserveCommand(ctx);
+  if (!preserveCmd) await safeDelete(chatId, ctx.message.message_id);
 
-  // Check admin privileges: Admins do NOT trigger auto-cleanup/cooldown
   const isAdmin = await isGroupAdmin(ctx, requesterId);
 
   const db = await connectToDatabase();
   await cleanupStaleMenus(db, chatId);
 
-  const rawInput = ctx.message.text.trim().split(/\s+/).slice(1).join(' ');
+  const rawInput = ctx.message.text.trim()
+    .replace(/\s+(--keep|-k)\b/gi, '')
+    .split(/\s+/)
+    .slice(1)
+    .join(' ');
   let courseCode = extractCourseCode(rawInput);
 
   if (!courseCode && !isGeneralTab(ctx)) {
@@ -661,7 +754,6 @@ bot.command('course', async (ctx) => {
 
   buttons.push([Markup.button.callback('🗑 Close Menu', `dismiss_${requesterId}`)]);
 
-  // Expiration footer logic: Permanent for admins, 30m countdown for students
   const expiryFooter = isAdmin 
     ? `\n\n<i>📌 Pinned Menu by Admin • Permanent</i>`
     : `\n\n<i>⏳ Expires in 30m • Reply /keep to extend</i>`;
@@ -674,7 +766,6 @@ bot.command('course', async (ctx) => {
     }
   );
 
-  // Admin menus stay indefinitely; student menus expire in 30 minutes
   const expiresAt = isAdmin ? null : new Date(Date.now() + MENU_TTL_MS);
 
   await activeMenus.updateOne(
@@ -690,7 +781,6 @@ bot.command('course', async (ctx) => {
     { upsert: true }
   );
 
-  // Fallback in-memory timeout for warm instances (only for non-admin invocations)
   if (!isAdmin) {
     setTimeout(async () => {
       const currentRecord = await activeMenus.findOne({ chatId, messageId: menuMsg.message_id });
