@@ -19,7 +19,7 @@ async function connectToDatabase() {
   return cachedDb;
 }
 
-// Safe Message Deletion (Catches missing bot rights or already-deleted messages)
+// Safe Message Deletion
 async function safeDelete(chatId, messageIds) {
   try {
     const ids = Array.isArray(messageIds) ? messageIds : [messageIds];
@@ -35,7 +35,7 @@ async function safeDelete(chatId, messageIds) {
   }
 }
 
-// Lazy Timer: Sweep and purge expired active menus or banners from chat
+// Lazy Timer: Purges expired banners and active menus
 async function cleanupStaleMenus(db, chatId) {
   try {
     const now = new Date();
@@ -61,7 +61,7 @@ async function cleanupStaleMenus(db, chatId) {
   }
 }
 
-// Admin Check (Group Creator, Administrators, or Master Super Admin)
+// Admin Check
 async function isGroupAdmin(ctx, userId) {
   if (String(userId) === String(process.env.SUPER_ADMIN_ID)) return true;
   try {
@@ -72,20 +72,19 @@ async function isGroupAdmin(ctx, userId) {
   }
 }
 
-// Identify if the message context is the General tab / Main root
 function isGeneralTab(ctx) {
   const threadId = ctx.message?.message_thread_id;
   return !threadId || threadId === 1;
 }
 
-// Course Code Normalizer: Supports 2 to 4 letters ("chem 108", "CHEM-108", "med 101" -> "CHEM108", "MED101")
+// Course Code Normalizer: 2 to 4 letters followed by 3 digits
 function extractCourseCode(text) {
   if (!text) return null;
   const match = text.match(/\b([a-zA-Z]{2,4})\s*[-_]?\s*([0-9]{3})\b/i);
   return match ? `${match[1].toUpperCase()}${match[2]}` : null;
 }
 
-// Strict Type Classifier: Word boundaries prevent false triggers (e.g., "opaque", "equipment")
+// Material Classifier: Word boundaries prevent false positive substring matches
 function detectMaterialType(rawTitle, caption = '') {
   const cleanedText = `${rawTitle} ${caption}`
     .replace(/\.(pdf|docx?|pptx?|epub|txt)/gi, ' ')
@@ -96,11 +95,37 @@ function detectMaterialType(rawTitle, caption = '') {
   return isPQ ? 'pq' : 'doc';
 }
 
+// Custom Duration Parser: "30m", "2h", "1d", "permanent", "off" -> milliseconds
+function parseDuration(input) {
+  if (!input) return null;
+  const clean = input.trim().toLowerCase();
+  if (['0', 'off', 'perm', 'permanent', 'never'].includes(clean)) return 0;
+
+  const match = clean.match(/^(\d+)\s*(m|min|mins|h|hr|hrs|d|days?)$/i);
+  if (!match) return null;
+
+  const val = parseInt(match[1], 10);
+  const unit = match[2].toLowerCase();
+
+  if (unit.startsWith('m')) return val * 60 * 1000;
+  if (unit.startsWith('h')) return val * 60 * 60 * 1000;
+  if (unit.startsWith('d')) return val * 24 * 60 * 60 * 1000;
+  return null;
+}
+
+function formatDuration(ms) {
+  if (!ms || ms <= 0) return 'permanent';
+  const hours = ms / (60 * 60 * 1000);
+  if (hours >= 24) return `${Math.round(hours / 24)} day(s)`;
+  if (hours >= 1) return `${Math.round(hours)} hour(s)`;
+  return `${Math.round(ms / (60 * 1000))} minute(s)`;
+}
+
 function escapeHtml(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Topic Auto-Index: Newly created forum topics
+// Topic Auto-Index
 bot.on('forum_topic_created', async (ctx) => {
   const topic = ctx.message.forum_topic_created;
   const courseCode = extractCourseCode(topic.name);
@@ -122,7 +147,6 @@ bot.on('forum_topic_created', async (ctx) => {
   }
 });
 
-// Topic Auto-Index: Edited or renamed forum topics
 bot.on('forum_topic_edited', async (ctx) => {
   const edited = ctx.message.forum_topic_edited;
   if (!edited?.name) return;
@@ -145,7 +169,7 @@ bot.on('forum_topic_edited', async (ctx) => {
   }
 });
 
-// Manual Topic Linker: /setcourse CHEM108 (Cleans up previous mappings for this thread)
+// Manual Topic Linker: /setcourse CHEM108
 bot.command('setcourse', async (ctx) => {
   const chatId = ctx.chat.id;
   await safeDelete(chatId, ctx.message.message_id);
@@ -169,11 +193,7 @@ bot.command('setcourse', async (ctx) => {
   }
 
   const db = await connectToDatabase();
-
-  // Purge any stale/accidental course code attached to this topic
   await db.collection('topics').deleteMany({ chatId, threadId });
-
-  // Set the clean course mapping
   await db.collection('topics').updateOne(
     { chatId, threadId },
     { $set: { courseCode, updatedAt: new Date() } },
@@ -184,18 +204,75 @@ bot.command('setcourse', async (ctx) => {
   setTimeout(() => safeDelete(chatId, confirm.message_id), 5000);
 });
 
-// --- Dynamic Time-Aware Showcase Broadcast Handler ---
-bot.command(['hello', 'start', 'help'], async (ctx) => {
+// --- Bot Introduction Command (/hello) ---
+bot.command('hello', async (ctx) => {
   const chatId = ctx.chat.id;
   const userMsgId = ctx.message.message_id;
   const userId = ctx.from.id;
 
   await safeDelete(chatId, userMsgId);
 
-  // Check role: Admins post persistent banners, members trigger self-destructing banners
   const isAdmin = await isGroupAdmin(ctx, userId);
 
-  // Calculate West Africa Time (UTC+1)
+  const introText = 
+`🤖 <b>Hello, Elite Physios! I am your Departmental Academic Bot.</b>
+
+I am here to help you seamlessly organize, store, and access all course notes, slides, and past questions right inside our forum topics without cluttering the chat.
+
+• Use <code>/greet</code> to view the quick command guide.
+• Use <code>/course &lt;CODE&gt;</code> to browse materials.`;
+
+  const banner = await ctx.reply(introText, { parse_mode: 'HTML' });
+
+  if (!isAdmin) {
+    const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+    const db = await connectToDatabase();
+
+    await db.collection('active_menus').insertOne({
+      chatId,
+      messageId: banner.message_id,
+      type: 'intro',
+      expiresAt: new Date(Date.now() + THREE_HOURS_MS),
+      createdAt: new Date()
+    });
+
+    setTimeout(async () => {
+      const stillActive = await db.collection('active_menus').findOne({
+        chatId,
+        messageId: banner.message_id
+      });
+      if (stillActive) {
+        await safeDelete(chatId, banner.message_id);
+        await db.collection('active_menus').deleteOne({ chatId, messageId: banner.message_id });
+      }
+    }, THREE_HOURS_MS);
+  }
+});
+
+// --- Dynamic Showcase Command (/greet [time] [--keep]) ---
+bot.hears(/^\/greet(?:@\w+)?(?:\s+(.*))?$/i, async (ctx) => {
+  const chatId = ctx.chat.id;
+  const userMsgId = ctx.message.message_id;
+  const userId = ctx.from.id;
+  const rawArgs = (ctx.match[1] || '').trim().split(/\s+/).filter(Boolean);
+
+  const isAdmin = await isGroupAdmin(ctx, userId);
+
+  const shouldKeepCommand = isAdmin && rawArgs.some(arg => ['--keep', '-k', 'keep'].includes(arg.toLowerCase()));
+  if (!shouldKeepCommand) {
+    await safeDelete(chatId, userMsgId);
+  }
+
+  const timeArg = rawArgs.find(arg => !['--keep', '-k', 'keep'].includes(arg.toLowerCase()));
+
+  let durationMs = 0;
+  if (!isAdmin) {
+    durationMs = 3 * 60 * 60 * 1000;
+  } else if (timeArg) {
+    const parsed = parseDuration(timeArg);
+    if (parsed !== null) durationMs = parsed;
+  }
+
   const watHour = (new Date().getUTCHours() + 1) % 24;
   let greeting = 'Good evening';
   if (watHour >= 5 && watHour < 12) {
@@ -206,9 +283,12 @@ bot.command(['hello', 'start', 'help'], async (ctx) => {
     greeting = 'Late hours grind';
   }
 
-  const footerNote = isAdmin
-    ? `<i>📌 Pinned guide by Course Admin.</i>`
-    : `<i>Self-destructs in 3 hours to keep the chat clean.</i>`;
+  let footerNote;
+  if (durationMs === 0) {
+    footerNote = `<i>📌 Pinned portal guide by Course Admin.</i>`;
+  } else {
+    footerNote = `<i>Self-destructs in ${formatDuration(durationMs)} to keep chat clean.</i>`;
+  }
 
   const welcomeText = 
 `⚡ <b>${greeting}, Elite Physios! Win big today.</b>
@@ -223,24 +303,101 @@ ${footerNote}`;
 
   const banner = await ctx.reply(welcomeText, { parse_mode: 'HTML' });
 
-  // 3-hour expiry applies exclusively to regular members
-  if (!isAdmin) {
-    const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+  if (durationMs > 0) {
     const db = await connectToDatabase();
-
     await db.collection('active_menus').insertOne({
       chatId,
       messageId: banner.message_id,
       type: 'broadcast',
-      expiresAt: new Date(Date.now() + THREE_HOURS_MS),
+      expiresAt: new Date(Date.now() + durationMs),
       createdAt: new Date()
     });
 
-    setTimeout(() => safeDelete(chatId, banner.message_id), THREE_HOURS_MS);
+    setTimeout(async () => {
+      const stillActive = await db.collection('active_menus').findOne({
+        chatId,
+        messageId: banner.message_id
+      });
+      if (stillActive) {
+        await safeDelete(chatId, banner.message_id);
+        await db.collection('active_menus').deleteOne({ chatId, messageId: banner.message_id });
+      }
+    }, durationMs);
   }
 });
 
-// --- /save Handler with Confirmation & Declination Alerts ---
+// --- Admin /keep Command with Custom Timestamp & Status Update ---
+bot.command('keep', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const userMsgId = ctx.message.message_id;
+
+  const isAdmin = await isGroupAdmin(ctx, ctx.from.id);
+  if (!isAdmin) {
+    await safeDelete(chatId, userMsgId);
+    return;
+  }
+
+  const replyTarget = ctx.message.reply_to_message;
+  if (!replyTarget) {
+    await safeDelete(chatId, userMsgId);
+    const declination = await ctx.reply('⚠️ <b>Declined:</b> Reply directly with <code>/keep [time]</code> to the message you want to preserve.', { parse_mode: 'HTML' });
+    setTimeout(() => safeDelete(chatId, declination.message_id), 6000);
+    return;
+  }
+
+  const rawText = ctx.message.text.trim();
+  const args = rawText.split(/\s+/).slice(1);
+  const shouldKeepCommand = args.some(arg => ['--keep', '-k', 'keep'].includes(arg.toLowerCase()));
+  if (!shouldKeepCommand) {
+    await safeDelete(chatId, userMsgId);
+  }
+
+  const timeArg = args.find(arg => !['--keep', '-k', 'keep'].includes(arg.toLowerCase()));
+  const durationMs = timeArg ? parseDuration(timeArg) : 0; // 0 means permanent
+
+  const db = await connectToDatabase();
+  const targetId = replyTarget.message_id;
+
+  if (durationMs === 0) {
+    await db.collection('active_menus').deleteMany({ chatId, messageId: targetId });
+  } else {
+    const expiresAt = new Date(Date.now() + durationMs);
+    await db.collection('active_menus').updateOne(
+      { chatId, messageId: targetId },
+      { $set: { expiresAt, updatedAt: new Date() } },
+      { upsert: true }
+    );
+  }
+
+  try {
+    let originalText = replyTarget.text || replyTarget.caption || '';
+    originalText = originalText.replace(/\n\n<i>(Self-destructs.*?|📌 Pinned.*?|📌 Kept.*?)<\/i>/gis, '');
+    
+    const timestampLabel = durationMs === 0 ? 'Permanent' : `Until ${new Date(Date.now() + durationMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${formatDuration(durationMs)})`;
+    const newFooter = `\n\n<i>📌 Kept by Admin • ${timestampLabel}</i>`;
+    const updatedText = originalText + newFooter;
+
+    await ctx.telegram.editMessageText(
+      chatId,
+      targetId,
+      undefined,
+      updatedText,
+      {
+        parse_mode: 'HTML',
+        reply_markup: replyTarget.reply_markup
+      }
+    );
+
+    const confirm = await ctx.reply(`✅ Message kept successfully (${timestampLabel}).`, { parse_mode: 'HTML' });
+    setTimeout(() => safeDelete(chatId, confirm.message_id), 4000);
+  } catch (err) {
+    console.warn('Could not edit kept message text:', err.message);
+    const confirm = await ctx.reply('📌 <b>Preserved:</b> Message marked as kept.', { parse_mode: 'HTML' });
+    setTimeout(() => safeDelete(chatId, confirm.message_id), 4000);
+  }
+});
+
+// --- /save Handler ---
 bot.command('save', async (ctx) => {
   const chatId = ctx.chat.id;
   const userMsgId = ctx.message.message_id;
@@ -264,7 +421,6 @@ bot.command('save', async (ctx) => {
   const rawInput = ctx.message.text.trim().split(/\s+/).slice(1).join(' ');
   let courseCode = null;
 
-  // 1. Argument passed: /save CHEM108 or /save Anatomy
   if (rawInput) {
     courseCode = extractCourseCode(rawInput);
     if (!courseCode) {
@@ -276,13 +432,11 @@ bot.command('save', async (ctx) => {
     }
   }
 
-  // 2. Infer from current topic if inside one
   if (!courseCode && !isGeneralTab(ctx)) {
     const topicEntry = await db.collection('topics').findOne({ chatId, threadId: currentThreadId });
     if (topicEntry) courseCode = topicEntry.courseCode;
   }
 
-  // Declination: Course cannot be resolved
   if (!courseCode) {
     const declination = await ctx.reply(
       '⚠️ <b>Declined:</b> Specify the course code or topic name.\nExample: <code>/save CHEM108</code> or reply inside that course\'s topic.',
@@ -327,7 +481,7 @@ bot.command('save', async (ctx) => {
   setTimeout(() => safeDelete(chatId, confirmation.message_id), 5000);
 });
 
-// --- /move Handler with Reclassification Alerts ---
+// --- /move Handler ---
 bot.command('move', async (ctx) => {
   const chatId = ctx.chat.id;
   await safeDelete(chatId, ctx.message.message_id);
@@ -384,7 +538,7 @@ bot.command('move', async (ctx) => {
   setTimeout(() => safeDelete(chatId, confirmation.message_id), 5000);
 });
 
-// --- /remove Handler with Declination Alerts ---
+// --- /remove Handler ---
 bot.command(['remove', 'delete'], async (ctx) => {
   const chatId = ctx.chat.id;
   await safeDelete(chatId, ctx.message.message_id);
